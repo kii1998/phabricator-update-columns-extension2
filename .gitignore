@@ -1,0 +1,84 @@
+# Build outputs and dependencies
+node_modules/
+dist/
+build/
+*.log
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Sensitive deployment files (IMPORTANT - DO NOT COMMIT)
+ssh_server/deployment_config
+ssh_server/server_password
+ssh_server/*_password
+ssh_server/*.psw
+ssh_server/ssh_password.exp
+ssh_server/scp_password.exp
+ssh_server/auto_*.exp
+
+# Legacy sensitive files (keep for backward compatibility)
+ssh_server/orangepizero3psw
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Cache and runtime files
+*.cache
+.cache/
+runtime/
+
+# User-specific configuration files
+config/local.php
+config/production.php
+config/staging.php
+
+# SSH keys and certificates
+*.pem
+*.key
+*.crt
+*.p12
+id_rsa*
+id_ed25519*
+
+# Database dumps and backups
+*.sql
+*.dump
+*.backup
+backup/
+
+# Any file containing "password", "secret", or "private" in the name (except templates)
+*password*
+*secret*
+*private*
+*credential*
+
+# Allow template files
+!*.template
+
+# Environment-specific scripts
+deploy_local.sh
+deploy_production.sh
+deploy_staging.sh

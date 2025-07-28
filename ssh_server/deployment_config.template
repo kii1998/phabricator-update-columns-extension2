@@ -1,0 +1,27 @@
+# Deployment Configuration Template
+# Copy this file and rename it to 'deployment_config' then fill in your details
+
+# Server Configuration
+PHABRICATOR_SERVER="YOUR_SERVER_IP"
+PHABRICATOR_USER="YOUR_USERNAME"
+PASSWORD_FILE="ssh_server/server_password"
+
+# Container Configuration
+DOCKER_CONTAINER_NAME="phabricator"
+DOCKER_USER="root"
+
+# Paths
+REMOTE_TMP_PATH="/tmp"
+PHABRICATOR_EXTENSION_PATH="/srv/phabricator/src/extensions/PhorgeAutoMove"
+PHABRICATOR_WEBROOT_PATH="/srv/phabricator/webroot/rsrc/js/application/updatecolumns"
+
+# Example values (replace with your actual values):
+# PHABRICATOR_SERVER="192.168.1.100"
+# PHABRICATOR_USER="deploy"
+# PASSWORD_FILE="ssh_server/my_server_password"
+
+# Usage:
+# 1. Copy this file: cp deployment_config.template deployment_config
+# 2. Edit deployment_config with your actual values
+# 3. Create password file: echo "your_password" > ssh_server/server_password
+# 4. Run deployment: ./quick_deploy.sh 
