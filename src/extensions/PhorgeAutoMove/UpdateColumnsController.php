@@ -4,8 +4,12 @@
  * Update Columns Controller
  * 
  * 处理"Update_Columns"按钮点击，根据任务优先级批量更新工作板列位置
+ * Optimized Version - 优化版本
  */
 final class UpdateColumnsController extends PhabricatorController {
+
+  // 共享服务实例，避免重复创建
+  private $update_service = null;
 
   public function shouldAllowPublic() {
     return false;
@@ -15,98 +19,128 @@ final class UpdateColumnsController extends PhabricatorController {
     $viewer = $this->getViewer();
     $project_id = $request->getURIData('projectID');
     
-    // 添加调试日志
-    phlog('UpdateColumnsController: handleRequest called');
-    phlog('UpdateColumnsController: isAjax=' . ($request->isAjax() ? 'true' : 'false'));
-    phlog('UpdateColumnsController: isFormPost=' . ($request->isFormPost() ? 'true' : 'false'));
-    
-    // 检查AJAX相关的请求头
-    $headers = $request->getHTTPHeader('X-Requested-With');
-    phlog('UpdateColumnsController: X-Requested-With header=' . ($headers ?: 'not set'));
-    
-    $accept = $request->getHTTPHeader('Accept');
-    phlog('UpdateColumnsController: Accept header=' . ($accept ?: 'not set'));
-    
-    $contentType = $request->getHTTPHeader('Content-Type');
-    phlog('UpdateColumnsController: Content-Type header=' . ($contentType ?: 'not set'));
-    
-    // 检查POST数据中的__ajax__参数
-    $ajaxParam = $request->getStr('__ajax__');
-    phlog('UpdateColumnsController: __ajax__ parameter=' . ($ajaxParam ?: 'not set'));
-    
-    // 通过数字ID获取项目对象
-    $project = id(new PhabricatorProjectQuery())
-      ->setViewer($viewer)
-      ->withIDs(array($project_id))
-      ->executeOne();
-    
+    // 获取项目对象
+    $project = $this->getProjectById($project_id, $viewer);
     if (!$project) {
       return new Aphront404Response();
     }
 
     // 检查用户权限
-    if (!PhabricatorPolicyFilter::hasCapability(
-      $viewer,
-      $project,
-      PhabricatorPolicyCapability::CAN_VIEW)) {
+    if (!$this->checkProjectPermission($project, $viewer)) {
       return new Aphront403Response();
     }
 
-    // 处理AJAX请求 - 尝试多种识别方法
-    $isAjax = $request->isAjax() || 
-               $request->getHTTPHeader('X-Requested-With') === 'XMLHttpRequest' ||
-               $request->getStr('__ajax__') === '1' ||
-               strpos($request->getHTTPHeader('Accept') ?: '', 'application/json') !== false;
-    
-    phlog('UpdateColumnsController: Final AJAX detection=' . ($isAjax ? 'true' : 'false'));
-    
-    if ($isAjax && $request->isFormPost()) {
-      phlog('UpdateColumnsController: Processing AJAX request');
-      return $this->processUpdateColumnsAjax($project, $viewer, $request);
+    // 处理AJAX请求
+    if ($this->isAjaxRequest($request) && $request->isFormPost()) {
+      return $this->processUpdateRequest($project, $viewer, true);
     }
 
+    // 处理普通表单提交
     if ($request->isFormPost()) {
-      phlog('UpdateColumnsController: Processing regular form post');
-      return $this->processUpdateColumns($project, $viewer);
+      return $this->processUpdateRequest($project, $viewer, false);
     }
 
-    phlog('UpdateColumnsController: Rendering confirmation dialog');
+    // 渲染确认对话框
     return $this->renderConfirmationDialog($project);
   }
 
-  private function processUpdateColumnsAjax($project, $viewer, $request) {
-    phlog('UpdateColumnsController: processUpdateColumnsAjax called');
-    
+  /**
+   * 获取项目对象
+   */
+  private function getProjectById($project_id, $viewer) {
+    return id(new PhabricatorProjectQuery())
+      ->setViewer($viewer)
+      ->withIDs(array($project_id))
+      ->executeOne();
+  }
+
+  /**
+   * 检查项目权限
+   */
+  private function checkProjectPermission($project, $viewer) {
+    return PhabricatorPolicyFilter::hasCapability(
+      $viewer,
+      $project,
+      PhabricatorPolicyCapability::CAN_VIEW
+    );
+  }
+
+  /**
+   * 检查是否为AJAX请求
+   */
+  private function isAjaxRequest($request) {
+    return $request->isAjax() || 
+           $request->getHTTPHeader('X-Requested-With') === 'XMLHttpRequest' ||
+           $request->getStr('__ajax__') === '1' ||
+           strpos($request->getHTTPHeader('Accept') ?: '', 'application/json') !== false;
+  }
+
+  /**
+   * 统一的更新处理逻辑
+   */
+  private function processUpdateRequest($project, $viewer, $is_ajax = false) {
     try {
-      // 获取项目PHID（这是真正的board ID）
+      // 获取工作板任务
       $board_phid = $project->getPHID();
-      
-      // 获取该工作板上的所有任务
-      $tasks = $this->getBoardTasks($board_phid, $viewer);
+      $tasks = $this->getBoardTasksOptimized($board_phid, $viewer);
       
       if (empty($tasks)) {
-        phlog('UpdateColumnsController: No tasks found');
-        return id(new AphrontAjaxResponse())
-          ->setContent(array(
-            'success' => false,
-            'error' => pht('No tasks found on this workboard.'),
-            'moved_count' => 0,
-            'error_count' => 0,
-            'total_count' => 0
-          ));
+        return $this->createEmptyTasksResponse($project, $is_ajax);
       }
 
-      // 使用更新服务批量处理任务
-      $service = new UpdateColumnsService();
+      // 获取服务实例并处理任务
+      $service = $this->getUpdateService();
       $results = $service->updateTaskColumns($tasks, $board_phid, $viewer);
 
-      // 创建成功响应
-      $moved_count = $results['moved_count'];
-      $error_count = $results['error_count'];
-      $total_count = count($tasks);
-      
-      phlog('UpdateColumnsController: AJAX success - moved: ' . $moved_count . ', errors: ' . $error_count);
-      
+      // 创建响应
+      return $this->createSuccessResponse($project, $results, count($tasks), $is_ajax);
+
+    } catch (Exception $e) {
+      return $this->createErrorResponse($project, $e, $is_ajax);
+    }
+  }
+
+  /**
+   * 获取更新服务实例（单例模式）
+   */
+  private function getUpdateService() {
+    if ($this->update_service === null) {
+      $this->update_service = new UpdateColumnsService();
+    }
+    return $this->update_service;
+  }
+
+  /**
+   * 创建空任务响应
+   */
+  private function createEmptyTasksResponse($project, $is_ajax) {
+    $message = pht('No tasks found on this workboard.');
+    
+    if ($is_ajax) {
+      return id(new AphrontAjaxResponse())
+        ->setContent(array(
+          'success' => false,
+          'error' => $message,
+          'moved_count' => 0,
+          'error_count' => 0,
+          'total_count' => 0
+        ));
+    } else {
+      return $this->newDialog()
+        ->setTitle(pht('No Tasks Found'))
+        ->appendChild($message)
+        ->addCancelButton('/project/board/' . $project->getID() . '/', pht('OK'));
+    }
+  }
+
+  /**
+   * 创建成功响应
+   */
+  private function createSuccessResponse($project, $results, $total_count, $is_ajax) {
+    $moved_count = $results['moved_count'];
+    $error_count = $results['error_count'];
+    
+    if ($is_ajax) {
       return id(new AphrontAjaxResponse())
         ->setContent(array(
           'success' => true,
@@ -119,64 +153,101 @@ final class UpdateColumnsController extends PhabricatorController {
             $total_count
           )
         ));
+    } else {
+      // 对于非AJAX请求，重定向回工作板
+      return id(new AphrontRedirectResponse())
+        ->setURI('/project/board/' . $project->getID() . '/');
+    }
+  }
 
-    } catch (Exception $e) {
-      phlog('UpdateColumnsController: AJAX error - ' . $e->getMessage());
-      // 生成错误日志链接
-      $error_log_uri = '/logs/error/' . date('Y-m-d');
-      
+  /**
+   * 创建错误响应
+   */
+  private function createErrorResponse($project, $exception, $is_ajax) {
+    $error_message = pht('Failed to update columns: %s', $exception->getMessage());
+    phlog('UpdateColumnsController: Error - ' . $exception->getMessage());
+    
+    if ($is_ajax) {
       return id(new AphrontAjaxResponse())
         ->setContent(array(
           'success' => false,
-          'error' => pht('Failed to update columns: %s', $e->getMessage()),
-          'error_log_uri' => $error_log_uri,
+          'error' => $error_message,
+          'error_log_uri' => '/logs/error/' . date('Y-m-d'),
           'moved_count' => 0,
           'error_count' => 1,
           'total_count' => 0
         ));
+    } else {
+      return $this->newDialog()
+        ->setTitle(pht('Update Failed'))
+        ->appendChild($error_message)
+        ->addCancelButton('/project/board/' . $project->getID() . '/', pht('OK'));
     }
   }
 
-  private function processUpdateColumns($project, $viewer) {
-    try {
-      // 获取项目PHID（这是真正的board ID）
-      $board_phid = $project->getPHID();
-      
-      // 获取该工作板上的所有任务
-      $tasks = $this->getBoardTasks($board_phid, $viewer);
-      
-      if (empty($tasks)) {
-        return $this->newDialog()
-          ->setTitle(pht('No Tasks Found'))
-          ->appendChild(pht('No tasks found on this workboard.'))
-          ->addCancelButton('/project/board/' . $project->getID() . '/', pht('OK'));
-      }
-
-      // 使用更新服务批量处理任务
-      $service = new UpdateColumnsService();
-      $results = $service->updateTaskColumns($tasks, $board_phid, $viewer);
-
-      // 创建成功响应
-      $moved_count = $results['moved_count'];
-      $error_count = $results['error_count'];
-      $total_count = count($tasks);
-      
-      $message = pht(
-        'Updated %d of %d tasks based on priority. %d errors occurred.',
-        $moved_count,
-        $total_count,
-        $error_count
-      );
-
-      return id(new AphrontRedirectResponse())
-        ->setURI('/project/board/' . $project->getID() . '/');
-
-    } catch (Exception $e) {
-      return $this->newDialog()
-        ->setTitle(pht('Update Failed'))
-        ->appendChild(pht('Failed to update columns: %s', $e->getMessage()))
-        ->addCancelButton('/project/board/' . $project->getID() . '/', pht('OK'));
+  /**
+   * 优化的任务获取逻辑
+   */
+  private function getBoardTasksOptimized($board_phid, $viewer) {
+    // 方法1：通过边查询获取与项目关联的任务（主要方法）
+    $edge_query = id(new PhabricatorEdgeQuery())
+      ->withSourcePHIDs(array($board_phid))
+      ->withEdgeTypes(array(
+        PhabricatorProjectProjectHasObjectEdgeType::EDGECONST,
+      ));
+    $task_phids = $edge_query->execute();
+    $task_phids = $edge_query->getDestinationPHIDs(array($board_phid));
+    
+    // 过滤出任务PHIDs
+    $task_phids = array_filter($task_phids, function($phid) {
+      return substr($phid, 0, 10) === 'PHID-TASK-';
+    });
+    
+    // 获取任务对象
+    if (!empty($task_phids)) {
+      return id(new ManiphestTaskQuery())
+        ->setViewer($viewer)
+        ->withPHIDs($task_phids)
+        ->withStatuses(ManiphestTaskStatus::getOpenStatusConstants())
+        ->execute();
     }
+
+    // 备用方法：位置查询
+    return $this->getBoardTasksByPosition($board_phid, $viewer);
+  }
+
+  /**
+   * 通过位置查询获取任务（备用方法）
+   */
+  private function getBoardTasksByPosition($board_phid, $viewer) {
+    $positions = id(new PhabricatorProjectColumnPositionQuery())
+      ->setViewer($viewer)
+      ->withBoardPHIDs(array($board_phid))
+      ->execute();
+
+    if (empty($positions)) {
+      return array();
+    }
+
+    // 提取任务PHIDs
+    $task_phids = array();
+    foreach ($positions as $position) {
+      $object_phid = $position->getObjectPHID();
+      if (substr($object_phid, 0, 10) === 'PHID-TASK-') {
+        $task_phids[] = $object_phid;
+      }
+    }
+
+    if (empty($task_phids)) {
+      return array();
+    }
+
+    // 获取任务对象
+    return id(new ManiphestTaskQuery())
+      ->setViewer($viewer)
+      ->withPHIDs($task_phids)
+      ->withStatuses(ManiphestTaskStatus::getOpenStatusConstants())
+      ->execute();
   }
 
   private function renderConfirmationDialog($project) {
@@ -213,82 +284,5 @@ final class UpdateColumnsController extends PhabricatorController {
       ->addCancelButton('/project/board/' . $project->getID() . '/', pht('Cancel'));
 
     return $dialog;
-  }
-
-  /**
-   * 获取指定工作板上的所有任务
-   * 修复：不依赖位置查询，直接通过项目关系获取任务
-   */
-  private function getBoardTasks($board_phid, $viewer) {
-    phlog('UpdateColumnsController: getBoardTasks called for board=' . $board_phid);
-    
-    // 方法1：通过边查询获取与项目关联的任务（更可靠）
-    $edge_query = id(new PhabricatorEdgeQuery())
-      ->withSourcePHIDs(array($board_phid))
-      ->withEdgeTypes(array(
-        PhabricatorProjectProjectHasObjectEdgeType::EDGECONST,
-      ));
-    $task_phids = $edge_query->execute();
-    $task_phids = $edge_query->getDestinationPHIDs(array($board_phid));
-    
-    // 过滤出任务PHIDs
-    $task_phids = array_filter($task_phids, function($phid) {
-      return substr($phid, 0, 10) === 'PHID-TASK-';
-    });
-    
-    phlog('UpdateColumnsController: Found ' . count($task_phids) . ' task PHIDs via edge query');
-    
-    $tasks = array();
-    if (!empty($task_phids)) {
-      $tasks = id(new ManiphestTaskQuery())
-        ->setViewer($viewer)
-        ->withPHIDs($task_phids)
-        ->withStatuses(ManiphestTaskStatus::getOpenStatusConstants())
-        ->execute();
-    }
-
-    phlog('UpdateColumnsController: Found ' . count($tasks) . ' tasks via project relation');
-    
-    // 如果直接查询没有结果，尝试位置查询作为备用方案
-    if (empty($tasks)) {
-      phlog('UpdateColumnsController: Falling back to position query');
-      
-      $positions = id(new PhabricatorProjectColumnPositionQuery())
-        ->setViewer($viewer)
-        ->withBoardPHIDs(array($board_phid))
-        ->execute();
-
-      if (!empty($positions)) {
-        // 提取任务PHIDs
-        $task_phids = array();
-        foreach ($positions as $position) {
-          $object_phid = $position->getObjectPHID();
-          // 只处理任务对象
-          if (substr($object_phid, 0, 10) === 'PHID-TASK-') {
-            $task_phids[] = $object_phid;
-          }
-        }
-
-        if (!empty($task_phids)) {
-          // 获取任务对象
-          $tasks = id(new ManiphestTaskQuery())
-            ->setViewer($viewer)
-            ->withPHIDs($task_phids)
-            ->withStatuses(ManiphestTaskStatus::getOpenStatusConstants())
-            ->execute();
-            
-          phlog('UpdateColumnsController: Found ' . count($tasks) . ' tasks via position query fallback');
-        }
-      }
-    }
-
-    // 为每个任务记录调试信息
-    foreach ($tasks as $task) {
-      $priority = $task->getPriority();
-      $status = $task->getStatus();
-      phlog('UpdateColumnsController: Task T' . $task->getID() . ' - Priority: ' . $priority . ', Status: ' . $status);
-    }
-
-    return $tasks;
   }
 } 
